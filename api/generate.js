@@ -75,7 +75,6 @@ export default async function handler(req, res) {
 
     const completion = await client.chat.completions.create({
       model,
-      temperature: toneLevel === "harsh" || toneLevel === "late-night" ? 0.9 : 0.7,
       response_format: { type: "json_object" }, // 安定化のため一旦obj→中でarray
       messages: [
         { role: "system", content: system },
