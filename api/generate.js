@@ -92,7 +92,7 @@ export default async function handler(req, res) {
     }
 
     const toneLevel = normTone(tone);
-    const model = process.env.XAI_MODEL || "grok-4";
+    const model = process.env.XAI_MODEL || "grok-4-fast-reasoning";
 
     const systemPrompt = [
       "You are a dialogue generator that writes witty satire/irony banter as two fictional speakers A and B.",
