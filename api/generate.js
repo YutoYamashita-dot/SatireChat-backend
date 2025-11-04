@@ -60,10 +60,8 @@ export default async function handler(req, res) {
         register: toneLevel, // mild/normal/harsh/late-night/philosophical
         avoid: [
           "protected-class attacks",
-          "real-person doxxing",
-          "violence incitement",
-          "sexual explicit content",
-          "personal data"
+          "violence incitement"
+          
         ],
         prefer: [
           "clever social satire",
