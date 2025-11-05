@@ -64,15 +64,63 @@ function parseLLMJson(content) {
   return null;
 }
 
-function sanitizeAndCoerce20(items) {
+const EMPATHY_TOKENS = [
+  "わかる", "それな", "たしかに", "確かに", "そうだね", "なるほど",
+  "共感する", "ほんと", "本当", "まあね", "同感", "そうなんだよ"
+];
+
+function ensureEmpathy(text) {
+  const hasEmpathy = EMPATHY_TOKENS.some((t) => text.includes(t));
+  if (hasEmpathy) return text;
+  // デフォルトで軽い共感を前置き
+  return `わかる、${text}`;
+}
+
+// 長さ制約（10〜70字）を満たすように整形
+function clampLength(text, word) {
+  let t = String(text).trim().replace(/\s+/g, " ");
+  // まず上限カット（句点等で自然に切れない場合は70字で強制）
+  if (t.length > 70) {
+    // できれば句読点で切る
+    const cut = t.slice(0, 70);
+    const lastPunc = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("、"), cut.lastIndexOf("！"), cut.lastIndexOf("？"));
+    t = lastPunc >= 10 ? cut.slice(0, lastPunc + 1) : cut;
+  }
+  // 下限補強
+  if (t.length < 10) {
+    const filler = `…だよね。`;
+    t = (t + filler).slice(0, 70);
+    if (t.length < 10) {
+      t = `${t}${word}の話だけどさ`; // 最後の保険
+      if (t.length > 70) t = t.slice(0, 70);
+    }
+  }
+  return t;
+}
+
+function enforceConstraints(text, word) {
+  // 共感ワード付与 → 文字数調整 → もう一度上限チェック
+  let t = ensureEmpathy(text);
+  t = clampLength(t, word);
+  if (t.length > 70) t = t.slice(0, 70);
+  // 句点が皆無なら軽く締める
+  if (!/[。！？!?]$/.test(t) && t.length <= 68) t += "。";
+  return t;
+}
+
+function sanitizeAndCoerce20(items, word) {
   // items: [{speaker,text}] を20本に整える。speakerはA/B交互を強制。
   const sliced = (Array.isArray(items) ? items : []).slice(0, 20);
   const cleaned = sliced
-    .map((e, i) => ({
-      speaker: i % 2 === 0 ? "A" : "B",
-      text: String(e?.text ?? "").trim().replace(/\s+/g, " ")
-    }))
-    .filter((e) => e.text.length > 0);
+    .map((e, i) => {
+      const rawText = String(e?.text ?? "");
+      const enforced = enforceConstraints(rawText, word);
+      return {
+        speaker: i % 2 === 0 ? "A" : "B",
+        text: enforced
+      };
+    })
+    .filter((e) => e.text && e.text.length >= 10 && e.text.length <= 70);
 
   return cleaned.length === 20 ? cleaned : null;
 }
@@ -97,9 +145,11 @@ export default async function handler(req, res) {
     const systemPrompt = [
       "You are a dialogue generator that writes witty satire/irony banter as two fictional speakers A and B.",
       "Hard constraints:",
-      "- Keep it sharp: focus on ideas, institutions, trends, generic characters.",
+      "- Focus the satire/irony/complaints on the given 'word' topic; do not attack protected classes or real identifiable people.",
+      "- Each line MUST include a brief empathetic phrase (e.g., Japanese equivalents of 'I get it', '確かに', 'それな').",
       "- Output in Japanese.",
       "- Exactly 20 exchanges (A/B alternating), one-liner each.",
+      "- Each text length MUST be between 10 and 70 Japanese characters inclusive.",
       '- Return ONLY valid JSON: {"data":[{"speaker":"A"|"B","text":"..."} x20]} with no extra text.'
     ].join("\n");
 
@@ -107,10 +157,12 @@ export default async function handler(req, res) {
       word,
       tone: toneLevel,
       styleGuide: {
-        lengthPerLine: "short",
+        lengthPerLine: "10-70 chars per line",
         register: toneLevel,
-        avoid: ["protected-class attacks", "violence incitement"],
-        prefer: ["clever social satire", "workplace/tech/romance generic archetypes", "wordplay", "benign violation"],
+        mustInclude: "an empathetic phrase in each line (e.g., わかる, それな, たしかに, なるほど)",
+        target: `satire/irony/complaints aimed at the topic "${word}" (ideas/institutions/behaviors; no protected-class attacks)`,
+        avoid: ["protected-class attacks", "real-person doxxing", "violence incitement", "sexual explicit content"],
+        prefer: ["clever social satire", "wordplay", "benign violation"],
         format: "A/B alternating for 20 lines total"
       }
     };
@@ -131,8 +183,6 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model,
           temperature: toneLevel === "harsh" || toneLevel === "late-night" ? 0.9 : 0.7,
-          // xAI は OpenAI 互換API。response_format の json_schema を理解するモデルが多い。
-          // モデル互換性のため、まずは "json_object" を優先し、壊れた場合はフェイルセーフで再parse。
           response_format: {
             type: "json_schema",
             json_schema: {
@@ -152,7 +202,7 @@ export default async function handler(req, res) {
                       required: ["speaker", "text"],
                       properties: {
                         speaker: { enum: ["A", "B"] },
-                        text: { type: "string" }
+                        text: { type: "string", minLength: 10, maxLength: 70 }
                       }
                     }
                   }
@@ -184,11 +234,10 @@ export default async function handler(req, res) {
     // ---- 応答から content を抽出し、安全にJSON化 ----
     const content =
       data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.message?.content?.[0]?.text ?? // 互換のための保険
+      data?.choices?.[0]?.message?.content?.[0]?.text ??
       "";
 
     let out = parseLLMJson(content);
-    // もし schema で {"data":[...]} が来ているなら優先
     if (!out && content) {
       try {
         const obj = JSON.parse(content.replace(/```json|```/g, "").trim());
@@ -196,10 +245,9 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    const cleaned = sanitizeAndCoerce20(out);
+    const cleaned = sanitizeAndCoerce20(out, word);
     if (!cleaned) {
-      // モデルが schema を守れなかった場合は 502（上流不整合）
-      return res.status(502).json({ error: "Upstream invalid JSON format" });
+      return res.status(502).json({ error: "Upstream invalid JSON format or length constraints not met" });
     }
 
     return res.status(200).json({ data: cleaned });
