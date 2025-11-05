@@ -81,9 +81,13 @@ function clampLength(text, word) {
   let t = String(text).trim().replace(/\s+/g, " ");
   // まず上限カット（句点等で自然に切れない場合は70字で強制）
   if (t.length > 70) {
-    // できれば句読点で切る
     const cut = t.slice(0, 70);
-    const lastPunc = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("、"), cut.lastIndexOf("！"), cut.lastIndexOf("？"));
+    const lastPunc = Math.max(
+      cut.lastIndexOf("。"),
+      cut.lastIndexOf("、"),
+      cut.lastIndexOf("！"),
+      cut.lastIndexOf("？")
+    );
     t = lastPunc >= 10 ? cut.slice(0, lastPunc + 1) : cut;
   }
   // 下限補強
@@ -91,7 +95,7 @@ function clampLength(text, word) {
     const filler = `…だよね。`;
     t = (t + filler).slice(0, 70);
     if (t.length < 10) {
-      t = `${t}${word}の話だけどさ`; // 最後の保険
+      t = `${t}${word}の話だけどさ`;
       if (t.length > 70) t = t.slice(0, 70);
     }
   }
@@ -109,18 +113,24 @@ function enforceConstraints(text, word) {
 }
 
 function sanitizeAndCoerce20(items, word) {
-  // items: [{speaker,text}] を20本に整える。speakerはA/B交互を強制。
-  const sliced = (Array.isArray(items) ? items : []).slice(0, 20);
-  const cleaned = sliced
-    .map((e, i) => {
-      const rawText = String(e?.text ?? "");
-      const enforced = enforceConstraints(rawText, word);
-      return {
-        speaker: i % 2 === 0 ? "A" : "B",
-        text: enforced
-      };
-    })
-    .filter((e) => e.text && e.text.length >= 10 && e.text.length <= 70);
+  // 20本固定で整形。speakerはA/B交互を強制。
+  const base = Array.from({ length: 20 }, (_, i) => {
+    const e = (Array.isArray(items) ? items : [])[i] || {};
+    const rawText = String(e?.text ?? "");
+    const enforced = enforceConstraints(rawText, word);
+    return {
+      speaker: i % 2 === 0 ? "A" : "B",
+      text: enforced
+    };
+  });
+
+  // ★ 最後の1行は「そうだね。」のみ（他の文は出力しない）
+  base[19].text = "そうだね。";
+
+  // 長さフィルタ（10〜70字）— ただし最後(19)は「そうだね。」を許可
+  const cleaned = base.filter((e, i) =>
+    i === 19 ? e.text === "そうだね。" : (e.text && e.text.length >= 10 && e.text.length <= 70)
+  );
 
   return cleaned.length === 20 ? cleaned : null;
 }
@@ -150,6 +160,7 @@ export default async function handler(req, res) {
       "- Output in Japanese.",
       "- Exactly 20 exchanges (A/B alternating), one-liner each.",
       "- Each text length MUST be between 10 and 70 Japanese characters inclusive.",
+      "- The FINAL (20th) line must be exactly: 「そうだね。」 with no other words.",
       '- Return ONLY valid JSON: {"data":[{"speaker":"A"|"B","text":"..."} x20]} with no extra text.'
     ].join("\n");
 
@@ -157,9 +168,9 @@ export default async function handler(req, res) {
       word,
       tone: toneLevel,
       styleGuide: {
-        lengthPerLine: "10-70 chars per line",
+        lengthPerLine: "10-70 chars per line (final line exempt, must be exactly そうだね。)",
         register: toneLevel,
-        mustInclude: "an empathetic phrase in each line (e.g., わかる, それな, たしかに, なるほど)",
+        mustInclude: "an empathetic phrase in each line (e.g., わかる, それな, たしかに, なるほど) — except the final line which must be exactly そうだね。",
         target: `satire/irony/complaints aimed at the topic "${word}" (ideas/institutions/behaviors; no protected-class attacks)`,
         avoid: ["protected-class attacks", "real-person doxxing", "violence incitement", "sexual explicit content"],
         prefer: ["clever social satire", "wordplay", "benign violation"],
@@ -202,6 +213,7 @@ export default async function handler(req, res) {
                       required: ["speaker", "text"],
                       properties: {
                         speaker: { enum: ["A", "B"] },
+                        // 最終行は後段で上書きするため、ここは一般ルールのまま
                         text: { type: "string", minLength: 10, maxLength: 70 }
                       }
                     }
